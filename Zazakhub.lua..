@@ -1,0 +1,519 @@
+--[[
+    ╔══════════════════════════════════════════════════════════╗
+    ║                       ZAZAK HUB                          ║
+    ║         Anti-Hit + Instant Steal + Z com Raios           ║
+    ║                    Versão 1.0                            ║
+    ╚══════════════════════════════════════════════════════════╝
+--]]
+
+--═══════════════════════════════════════════════════════════════
+-- [1] SERVIÇOS
+--═══════════════════════════════════════════════════════════════
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local StarterGui       = game:GetService("StarterGui")
+local TweenService     = game:GetService("TweenService")
+local CoreGui          = game:GetService("CoreGui")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui", 10)
+
+--═══════════════════════════════════════════════════════════════
+-- [2] CONFIGURAÇÕES
+--═══════════════════════════════════════════════════════════════
+local Config = {
+    AntiHit       = true,
+    InstantSteal  = false,
+    AntiRagdoll   = true,
+    AntiKick      = true,
+    RaioScan      = 200,
+    IntervaloScan = 0.15,
+    Cores = {
+        Fundo    = Color3.fromRGB(10, 8, 15),
+        Painel   = Color3.fromRGB(18, 12, 28),
+        Roxo     = Color3.fromRGB(138, 43, 226),
+        RoxoClaro= Color3.fromRGB(180, 120, 255),
+        Texto    = Color3.fromRGB(235, 230, 245),
+        Verde    = Color3.fromRGB(80, 255, 140),
+        Vermelho = Color3.fromRGB(255, 80, 80),
+        Cinza    = Color3.fromRGB(120, 120, 130),
+    }
+}
+
+local env = (typeof(getgenv) == "function" and getgenv()) or _G
+env.ZazakHub = env.ZazakHub or {}
+env.ZazakHub.Config = Config
+env.ZazakHub.Ativo = true
+env.ZazakHub.Conns = env.ZazakHub.Conns or {}
+
+--═══════════════════════════════════════════════════════════════
+-- [3] UTILITÁRIOS
+--═══════════════════════════════════════════════════════════════
+local function criar(className, props, children)
+    local ok, obj = pcall(Instance.new, className)
+    if not ok or not obj then return nil end
+    for k, v in pairs(props or {}) do pcall(function() obj[k] = v end) end
+    for _, c in ipairs(children or {}) do pcall(function() c.Parent = obj end) end
+    return obj
+end
+
+local function conectar(signal, fn)
+    local conn = signal:Connect(function(...) pcall(fn, ...) end)
+    table.insert(env.ZazakHub.Conns, conn)
+    return conn
+end
+
+local function notificar(titulo, texto)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = tostring(titulo),
+            Text = tostring(texto),
+            Duration = 3,
+        })
+    end)
+end
+
+--═══════════════════════════════════════════════════════════════
+-- [4] ANTI-HIT (genérico - funciona em qualquer boss)
+--═══════════════════════════════════════════════════════════════
+local AntiHit = {}
+AntiHit.hooked = false
+
+local RAGDOLL_STATES = {
+    [Enum.HumanoidStateType.Physics] = true,
+    [Enum.HumanoidStateType.Ragdoll] = true,
+    [Enum.HumanoidStateType.FallingDown] = true,
+}
+
+local RAGDOLL_CLASSES = {
+    BallSocketConstraint = true,
+    NoCollisionConstraint = true,
+    HingeConstraint = true,
+    RigidConstraint = true,
+}
+
+function AntiHit.limparPersonagem(char)
+    if not char or not char.Parent then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return end
+
+    pcall(function()
+        -- Restaura HP se perdeu
+        if hum.Health < hum.MaxHealth then
+            hum.Health = hum.MaxHealth
+        end
+
+        -- Desabilita ragdoll
+        if AntiRagdoll.ativo then
+            for state in pairs(RAGDOLL_STATES) do
+                pcall(function() hum:SetStateEnabled(state, false) end)
+            end
+            pcall(function() hum.BreakJointsOnDeath = false end)
+            pcall(function() hum.RequiresNeck = false end)
+
+            if hum.PlatformStand then hum.PlatformStand = false end
+
+            local st = hum:GetState()
+            if st == Enum.HumanoidStateType.Physics or st == Enum.HumanoidStateType.Ragdoll then
+                hum:ChangeState(Enum.HumanoidStateType.Running)
+            end
+
+            -- Remove constraints de ragdoll
+            for _, d in ipairs(char:GetDescendants()) do
+                if RAGDOLL_CLASSES[d.ClassName] then
+                    pcall(function() d:Destroy() end)
+                elseif d:IsA("Motor6D") and not d.Enabled then
+                    d.Enabled = true
+                end
+            end
+        end
+    end)
+end
+
+function AntiHit.ativar()
+    if AntiHit.hooked then return end
+    AntiHit.hooked = true
+
+    -- Loop contínuo: se o HP cair, restaura na hora
+    RunService.Heartbeat:Connect(function()
+        if not AntiHit.ativo then return end
+        local char = LocalPlayer.Character
+        if char then AntiHit.limparPersonagem(char) end
+    end)
+
+    conectar(LocalPlayer.CharacterAdded, function(char)
+        task.wait(0.5)
+        AntiHit.limparPersonagem(char)
+    end)
+
+    -- Tenta hook em TakeDamage se o executor permitir
+    pcall(function()
+        if hookmetamethod and newcclosure and getnamecallmethod then
+            local old
+            old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+                local method = getnamecallmethod()
+                if AntiHit.ativo and method == "TakeDamage" then
+                    if typeof(self) == "Instance" and self:IsA("Humanoid") then
+                        local char = self.Parent
+                        if char == LocalPlayer.Character then
+                            return nil
+                        end
+                    end
+                end
+                return old(self, ...)
+            end))
+        end
+    end)
+
+    notificar("Zazak Hub", "Anti-Hit ATIVO (todos os bosses)")
+end
+
+AntiHit.ativo = Config.AntiHit
+
+--═══════════════════════════════════════════════════════════════
+-- [5] ANTI-RAGDOLL
+--═══════════════════════════════════════════════════════════════
+local AntiRagdoll = { ativo = Config.AntiRagdoll }
+
+--═══════════════════════════════════════════════════════════════
+-- [6] ANTI-KICK
+--═══════════════════════════════════════════════════════════════
+local function ativarAntiKick()
+    pcall(function()
+        if hookfunction then
+            local old
+            old = hookfunction(LocalPlayer.Kick, function(self, msg)
+                if Config.AntiKick then
+                    warn("[Zazak] Kick bloqueado: " .. tostring(msg))
+                    return nil
+                end
+                return old(self, msg)
+            end)
+        end
+    end)
+
+    pcall(function()
+        if getrawmetatable and setreadonly and newcclosure and getnamecallmethod then
+            local mt = getrawmetatable(game)
+            setreadonly(mt, false)
+            local old = mt.__namecall
+            mt.__namecall = newcclosure(function(self, ...)
+                local m = getnamecallmethod()
+                if Config.AntiKick and m == "Kick" and typeof(self) == "Instance" and self:IsA("Player") then
+                    warn("[Zazak] Kick bloqueado (meta)")
+                    return nil
+                end
+                return old(self, ...)
+            end)
+            setreadonly(mt, true)
+        end
+    end)
+end
+
+--═══════════════════════════════════════════════════════════════
+-- [7] INSTANT STEAL
+--═══════════════════════════════════════════════════════════════
+local Steal = { ativo = Config.InstantSteal }
+
+local function pegarPrompt(ovo)
+    if not ovo then return nil end
+    local ok, p = pcall(function()
+        return ovo:FindFirstChildWhichIsA("ProximityPrompt", true)
+    end)
+    return ok and p or nil
+end
+
+local function roubarOvo(ovo)
+    if not ovo or not ovo.Parent then return false end
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local prompt = pegarPrompt(ovo)
+
+    if not hrp or not prompt then return false end
+
+    pcall(function() prompt.HoldDuration = 0 end)
+    pcall(function() prompt.MaxActivationDistance = math.huge end)
+
+    -- Teleporta até o ovo
+    pcall(function()
+        hrp.CFrame = CFrame.new(ovo:GetPivot().Position + Vector3.new(0, 3, 0))
+    end)
+
+    task.wait(0.05)
+
+    pcall(function()
+        if fireproximityprompt then fireproximityprompt(prompt) end
+    end)
+    pcall(function() prompt:InputHoldBegin() end)
+    pcall(function() prompt:InputHoldEnd() end)
+
+    return true
+end
+
+local function ovoMaisProximo()
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+
+    local melhor, menorDist = nil, Config.RaioScan
+
+    pcall(function()
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("Model") and (obj.Name:lower():find("egg") or obj.Name:lower():find("ovo")) then
+                local prompt = pegarPrompt(obj)
+                if prompt and prompt.Enabled then
+                    local dist = (hrp.Position - obj:GetPivot().Position).Magnitude
+                    if dist < menorDist then
+                        menorDist = dist
+                        melhor = obj
+                    end
+                end
+            end
+        end
+    end)
+
+    return melhor
+end
+
+local function loopSteal()
+    task.spawn(function()
+        while env.ZazakHub.Ativo do
+            if Steal.ativo then
+                local ovo = ovoMaisProximo()
+                if ovo then roubarOvo(ovo) end
+            end
+            task.wait(Config.IntervaloScan)
+        end
+    end)
+end
+
+--═══════════════════════════════════════════════════════════════
+-- [8] INTERFACE - "Z" COM RAIOS
+--═══════════════════════════════════════════════════════════════
+local GUI = { aberto = false }
+
+function GUI.criar()
+    local gui = criar("ScreenGui", {
+        Name = "ZazakHub",
+        ResetOnSpawn = false,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+        IgnoreGuiInset = true,
+    })
+    gui.Parent = PlayerGui
+    GUI.gui = gui
+
+    -- Container principal (arrastável)
+    local main = criar("Frame", {
+        Name = "Main",
+        Size = UDim2.new(0, 70, 0, 70),
+        Position = UDim2.new(0, 30, 0, 200),
+        BackgroundTransparency = 1,
+        Active = true,
+        Draggable = true,
+    })
+    main.Parent = gui
+
+    -- Anel externo (raios)
+    local raios = criar("Frame", {
+        Name = "Raios",
+        Size = UDim2.new(0, 70, 0, 70),
+        BackgroundColor3 = Config.Cores.Roxo,
+        BackgroundTransparency = 0.7,
+        BorderSizePixel = 0,
+    }, {
+        criar("UICorner", {CornerRadius = UDim.new(1, 0)}),
+    })
+    raios.Parent = main
+
+    -- Botão circular "Z"
+    local btnZ = criar("TextButton", {
+        Name = "BtnZ",
+        Size = UDim2.new(0, 60, 0, 60),
+        Position = UDim2.new(0.5, -30, 0.5, -30),
+        BackgroundColor3 = Config.Cores.Painel,
+        BorderSizePixel = 0,
+        Font = Enum.Font.GothamBlack,
+        TextSize = 32,
+        TextColor3 = Config.Cores.RoxoClaro,
+        Text = "Z",
+        AutoButtonColor = false,
+    }, {
+        criar("UICorner", {CornerRadius = UDim.new(1, 0)}),
+        criar("UIStroke", {Color = Config.Cores.Roxo, Thickness = 2}),
+    })
+    btnZ.Parent = main
+
+    -- Raios pequenos ao redor (6 traços)
+    local raiosPequenos = {}
+    for i = 1, 6 do
+        local angulo = (i / 6) * math.pi * 2
+        local x = math.cos(angulo) * 40
+        local y = math.sin(angulo) * 40
+
+        local raio = criar("Frame", {
+            Size = UDim2.new(0, 3, 0, 12),
+            Position = UDim2.new(0.5, x - 1, 0.5, y - 6),
+            BackgroundColor3 = Config.Cores.Roxo,
+            BorderSizePixel = 0,
+            Rotation = math.deg(angulo) + 90,
+        }, {
+            criar("UICorner", {CornerRadius = UDim.new(1, 0)}),
+        })
+        raio.Parent = main
+        table.insert(raiosPequenos, raio)
+    end
+
+    -- Rotação dos raios
+    local rot = 0
+    RunService.RenderStepped:Connect(function(dt)
+        rot = (rot + dt * 60) % 360
+        for i, raio in ipairs(raiosPequenos) do
+            local angulo = math.rad(rot + (i / #raiosPequenos) * 360)
+            local x = math.cos(angulo) * 40
+            local y = math.sin(angulo) * 40
+            raio.Position = UDim2.new(0.5, x - 1.5, 0.5, y - 6)
+            raio.Rotation = math.deg(angulo) + 90
+        end
+    end)
+
+    -- Painel de toggles (aparece quando clica no Z)
+    local painel = criar("Frame", {
+        Name = "Painel",
+        Size = UDim2.new(0, 200, 0, 180),
+        Position = UDim2.new(0, 110, 0, 200),
+        BackgroundColor3 = Config.Cores.Fundo,
+        BorderSizePixel = 0,
+        Visible = false,
+    }, {
+        criar("UICorner", {CornerRadius = UDim.new(0, 10)}),
+        criar("UIStroke", {Color = Config.Cores.Roxo, Thickness = 1.5}),
+    })
+    painel.Parent = gui
+
+    -- Título
+    criar("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 30),
+        Position = UDim2.new(0, 0, 0, 0),
+        BackgroundColor3 = Config.Cores.Roxo,
+        BorderSizePixel = 0,
+        Font = Enum.Font.GothamBlack,
+        TextSize = 14,
+        TextColor3 = Color3.new(1, 1, 1),
+        Text = "ZAZAK HUB",
+    }, {
+        criar("UICorner", {CornerRadius = UDim.new(0, 10)}),
+    }).Parent = painel
+
+    -- Função criar toggle
+    local function criarToggle(nome, chave, y)
+        local btn = criar("TextButton", {
+            Size = UDim2.new(1, -20, 0, 32),
+            Position = UDim2.new(0, 10, 0, y),
+            BackgroundColor3 = Config.Cores.Painel,
+            BorderSizePixel = 0,
+            Font = Enum.Font.GothamBold,
+            TextSize = 13,
+            TextColor3 = Config.Cores.Texto,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Text = "  " .. nome,
+        }, {
+            criar("UICorner", {CornerRadius = UDim.new(0, 6)}),
+            criar("UIStroke", {Color = Config.Cores.Roxo, Thickness = 1}),
+            criar("TextLabel", {
+                Name = "Status",
+                Size = UDim2.new(0, 50, 1, 0),
+                Position = UDim2.new(1, -55, 0, 0),
+                BackgroundTransparency = 1,
+                Font = Enum.Font.GothamBold,
+                TextSize = 12,
+                TextXAlignment = Enum.TextXAlignment.Right,
+                Text = "[ON]",
+            }),
+        })
+        btn.Parent = painel
+        return btn
+    end
+
+    local btnAntiHit = criarToggle("Anti-Hit", "AntiHit", 40)
+    local btnSteal = criarToggle("Instant Steal", "InstantSteal", 76)
+    local btnRagdoll = criarToggle("Anti-Ragdoll", "AntiRagdoll", 112)
+    local btnKick = criarToggle("Anti-Kick", "AntiKick", 148)
+
+    -- Atualiza visual
+    local function atualizar(btn, valor)
+        local st = btn:FindFirstChild("Status")
+        if not st then return end
+        st.Text = valor and "[ON]" or "[OFF]"
+        st.TextColor3 = valor and Config.Cores.Verde or Config.Cores.Cinza
+    end
+
+    atualizar(btnAntiHit, AntiHit.ativo)
+    atualizar(btnSteal, Steal.ativo)
+    atualizar(btnRagdoll, AntiRagdoll.ativo)
+    atualizar(btnKick, Config.AntiKick)
+
+    btnAntiHit.MouseButton1Click:Connect(function()
+        AntiHit.ativo = not AntiHit.ativo
+        Config.AntiHit = AntiHit.ativo
+        atualizar(btnAntiHit, AntiHit.ativo)
+        notificar("Zazak", "Anti-Hit: " .. (AntiHit.ativo and "ON" or "OFF"))
+    end)
+
+    btnSteal.MouseButton1Click:Connect(function()
+        Steal.ativo = not Steal.ativo
+        Config.InstantSteal = Steal.ativo
+        atualizar(btnSteal, Steal.ativo)
+        notificar("Zazak", "Instant Steal: " .. (Steal.ativo and "ON" or "OFF"))
+    end)
+
+    btnRagdoll.MouseButton1Click:Connect(function()
+        AntiRagdoll.ativo = not AntiRagdoll.ativo
+        Config.AntiRagdoll = AntiRagdoll.ativo
+        atualizar(btnRagdoll, AntiRagdoll.ativo)
+        notificar("Zazak", "Anti-Ragdoll: " .. (AntiRagdoll.ativo and "ON" or "OFF"))
+    end)
+
+    btnKick.MouseButton1Click:Connect(function()
+        Config.AntiKick = not Config.AntiKick
+        atualizar(btnKick, Config.AntiKick)
+        notificar("Zazak", "Anti-Kick: " .. (Config.AntiKick and "ON" or "OFF"))
+    end)
+
+    -- Abre/fecha painel
+    btnZ.MouseButton1Click:Connect(function()
+        GUI.aberto = not GUI.aberto
+        painel.Visible = GUI.aberto
+    end)
+
+    -- Atalho: segurar o Z por 1s fecha tudo
+    return gui
+end
+
+--═══════════════════════════════════════════════════════════════
+-- [9] INICIALIZAÇÃO
+--═══════════════════════════════════════════════════════════════
+local function init()
+    pcall(GUI.criar)
+    pcall(AntiHit.ativar)
+    pcall(ativarAntiKick)
+    pcall(loopSteal)
+
+    notificar("ZAZAK HUB", "Carregado! Anti-Hit + Instant Steal")
+    print("[Zazak Hub] Carregado")
+    print("  Anti-Hit: " .. (AntiHit.ativo and "ON" or "OFF"))
+    print("  Instant Steal: " .. (Steal.ativo and "ON" or "OFF"))
+    print("  Clique no 'Z' pra abrir o painel")
+end
+
+pcall(init)
+
+-- Unload
+env.ZazakHub.Unload = function()
+    env.ZazakHub.Ativo = false
+    for _, c in ipairs(env.ZazakHub.Conns) do
+        pcall(function() c:Disconnect() end)
+    end
+    if GUI.gui then pcall(function() GUI.gui:Destroy() end) end
+    print("[Zazak Hub] Descarregado")
+end
